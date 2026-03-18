@@ -17,6 +17,18 @@ function isEmpty(value) {
 }
 
 /**
+ * Extract a trimmed string from any field value.
+ * Handles text, single select, number, email, URL, and other types.
+ */
+function getCellString(record, field) {
+    const raw = record.getCellValue(field);
+    if (raw === null || raw === undefined) return '';
+    if (typeof raw === 'string') return raw.trim();
+    if (raw && raw.name) return raw.name.trim(); // single/multi select
+    return record.getCellValueAsString(field).trim(); // fallback
+}
+
+/**
  * Chunk an array into batches of a given size (max 50 for Airtable API).
  */
 function chunk(arr, size) {
@@ -70,24 +82,51 @@ function buildHeader(status) {
     return '# 🔗 Field → Linked Record Migrator\n\n**Status:** ' + status + '\n\n---';
 }
 
+// --- Field types that cannot be written to ---
+const UNWRITABLE_TYPES = new Set([
+    'formula', 'rollup', 'count', 'multipleLookupValues',
+    'autoNumber', 'createdTime', 'lastModifiedTime',
+    'createdBy', 'lastModifiedBy', 'button', 'externalSyncSource',
+]);
+
 // --- Main Script ---------------------------------------------
 
 const errors = []; // collect per-record errors instead of crashing
+let cancelled = false;
 
 // =============================================================
-// SETUP PHASE — User Configuration
+// SETUP PHASE — Interactive Field Selection
 // =============================================================
 
 let header = buildHeader('⚙️ Configuring migration...');
 output.clear();
-output.markdown(header);
+output.markdown(header + '\n\n_Select your source and target tables/fields below._');
 
-const config = input.config();
-const sourceTable = base.getTable(config.source_table);
-const sourceField = sourceTable.getField(config.source_field);
-const targetTable = base.getTable(config.target_table);
-const targetMatchField = targetTable.getField(config.target_match_field);
-const linkedRecordField = sourceTable.getField(config.linked_record_field);
+const sourceTable = await input.tableAsync('Pick the source table:');
+const sourceField = await input.fieldAsync('Pick the field to migrate (text or single select):', sourceTable);
+const targetTable = await input.tableAsync('Pick the target table to link to:');
+const targetMatchField = await input.fieldAsync('Pick the match field in the target table:', targetTable);
+
+// Guard: target match field must be writable
+if (UNWRITABLE_TYPES.has(targetMatchField.type)) {
+    output.clear();
+    output.markdown(buildHeader('❌ Configuration error') + '\n\n' +
+        '**' + targetMatchField.name + '** is a computed field (`' + targetMatchField.type + '`) and cannot be written to.\n\n' +
+        'Please re-run and pick a writable field (text, single select, number, email, etc.) as the match field.'
+    );
+    cancelled = true;
+}
+
+let linkedRecordField;
+if (!cancelled) {
+    linkedRecordField = await input.fieldAsync('Pick the linked record field to populate:', sourceTable);
+}
+
+// =============================================================
+// Run the migration (only if not cancelled)
+// =============================================================
+
+if (!cancelled) {
 
 // Load source records to get count for confirmation
 header = buildHeader('📋 Building migration plan...');
@@ -99,8 +138,8 @@ const sourceRecords = sourceQuery.records;
 // Count non-empty source values
 let recordsToUpdate = 0;
 for (const rec of sourceRecords) {
-    const val = rec.getCellValue(sourceField);
-    if (!isEmpty(val)) {
+    const val = getCellString(rec, sourceField);
+    if (val !== '') {
         recordsToUpdate++;
     }
 }
@@ -127,8 +166,10 @@ const confirmStart = await input.buttonsAsync(
 if (confirmStart === 'cancel') {
     output.clear();
     output.markdown(buildHeader('❌ Migration cancelled') + '\n\n_No changes were made._');
-    throw new Error('Migration cancelled by user.');
+    cancelled = true;
 }
+
+if (!cancelled) {
 
 // =============================================================
 // PHASE 1 — Value Discovery
@@ -140,16 +181,8 @@ renderProgress(header, '🔍 **Extracting unique values from source field...**\n
 // Extract unique non-empty values from source field
 const uniqueValues = new Set();
 for (const rec of sourceRecords) {
-    const raw = rec.getCellValue(sourceField);
-    let val = null;
-
-    if (sourceField.type === 'singleSelect' && raw && raw.name) {
-        val = raw.name.trim();
-    } else if (typeof raw === 'string') {
-        val = raw.trim();
-    }
-
-    if (val && val !== '') {
+    const val = getCellString(rec, sourceField);
+    if (val !== '') {
         uniqueValues.add(val);
     }
 }
@@ -162,16 +195,8 @@ const targetRecords = targetQuery.records;
 
 const targetLookup = {}; // value → record ID
 for (const rec of targetRecords) {
-    const raw = rec.getCellValue(targetMatchField);
-    let val = null;
-
-    if (targetMatchField.type === 'singleSelect' && raw && raw.name) {
-        val = raw.name.trim();
-    } else if (typeof raw === 'string') {
-        val = raw.trim();
-    }
-
-    if (val && val !== '') {
+    const val = getCellString(rec, targetMatchField);
+    if (val !== '') {
         targetLookup[val] = rec.id;
     }
 }
@@ -188,33 +213,47 @@ for (const val of uniqueValues) {
     }
 }
 
-// Show preview table
+// Show preview table (capped at 20 rows)
 header = buildHeader('🔍 Phase 1 — Value Discovery Complete');
 output.clear();
 
-const previewHeaders = ['Value', 'Action', 'Target Record'];
-const previewRows = [];
-
+const MAX_PREVIEW = 20;
+const allPreviewItems = [];
 for (const item of willLink) {
-    previewRows.push([
-        item.value.length > 40 ? item.value.substring(0, 37) + '...' : item.value,
-        '🔗 Link existing',
-        item.recordId,
-    ]);
+    allPreviewItems.push({
+        value: item.value,
+        action: '🔗 Link existing',
+        target: item.recordId,
+    });
 }
 for (const item of willCreate) {
-    previewRows.push([
-        item.value.length > 40 ? item.value.substring(0, 37) + '...' : item.value,
-        '🏗️ Create new',
-        '_(new)_',
-    ]);
+    allPreviewItems.push({
+        value: item.value,
+        action: '🏗️ Create new',
+        target: '_(new)_',
+    });
 }
 
-output.markdown(header + '\n\n' +
+const shownItems = allPreviewItems.slice(0, MAX_PREVIEW);
+const previewHeaders = ['Value', 'Action', 'Target Record'];
+const previewRows = shownItems.map(function (item) {
+    return [
+        item.value.length > 40 ? item.value.substring(0, 37) + '...' : item.value,
+        item.action,
+        item.target,
+    ];
+});
+
+let previewText = header + '\n\n' +
     '**' + willLink.length + '** value(s) will be linked to existing records\n\n' +
     '**' + willCreate.length + '** value(s) will require new records in **' + targetTable.name + '**\n\n' +
-    mdTable(previewHeaders, previewRows) + '\n'
-);
+    mdTable(previewHeaders, previewRows) + '\n\n';
+
+if (allPreviewItems.length > MAX_PREVIEW) {
+    previewText += '_...and ' + (allPreviewItems.length - MAX_PREVIEW) + ' more value(s) not shown_\n\n';
+}
+
+output.markdown(previewText);
 
 const confirmPhase2 = await input.buttonsAsync(
     'Confirm migration actions?',
@@ -227,8 +266,10 @@ const confirmPhase2 = await input.buttonsAsync(
 if (confirmPhase2 === 'cancel') {
     output.clear();
     output.markdown(buildHeader('❌ Migration cancelled') + '\n\n_No changes were made._');
-    throw new Error('Migration cancelled by user.');
+    cancelled = true;
 }
+
+if (!cancelled) {
 
 // =============================================================
 // PHASE 2 — Create Missing Records
@@ -250,7 +291,6 @@ if (willCreate.length > 0) {
 
         try {
             const newIds = await targetTable.createRecordsAsync(recordDefs);
-            // Map new IDs back to values and add to lookup
             for (let j = 0; j < batch.length; j++) {
                 targetLookup[batch[j].value] = newIds[j];
                 newRecordsCreated++;
@@ -295,17 +335,9 @@ for (let ri = 0; ri < freshSourceRecords.length; ri++) {
         renderProgress(header, '🔗 **Preparing updates... (' + ri + ' of ' + freshSourceRecords.length + ' records scanned)**\n\n_⏳ This may take a moment for large tables._');
     }
 
-    // Get the source value
-    const raw = rec.getCellValue(sourceField);
-    let val = null;
+    const val = getCellString(rec, sourceField);
 
-    if (sourceField.type === 'singleSelect' && raw && raw.name) {
-        val = raw.name.trim();
-    } else if (typeof raw === 'string') {
-        val = raw.trim();
-    }
-
-    if (!val || val === '') {
+    if (val === '') {
         skippedEmpty++;
         continue;
     }
@@ -316,7 +348,7 @@ for (let ri = 0; ri < freshSourceRecords.length; ri++) {
         errors.push({
             phase: 'Link',
             value: val,
-            error: 'No target record found in lookup map for value: ' + val,
+            error: 'No target record found in lookup map',
         });
         continue;
     }
@@ -429,3 +461,7 @@ if (cleanupChoice === 'delete') {
     output.clear();
     output.markdown(summaryReport + '_Migration complete. No further actions required._\n');
 }
+
+} // end if !cancelled (phase 2 confirm)
+} // end if !cancelled (initial confirm)
+} // end if !cancelled (unwritable guard)

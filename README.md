@@ -12,37 +12,29 @@ If you have a text or single-select field storing values that should really be l
 4. **Links** source records to the correct target records
 5. **Preserves** any existing links — never overwrites
 
-## Setup
-
-This script uses `input.config()` for configuration. When you add it to your base, you'll configure five settings:
-
-| Setting | Type | Description |
-|---------|------|-------------|
-| `source_table` | Table | The table containing the field to migrate |
-| `source_field` | Field | The text or single-select field with values to migrate |
-| `target_table` | Table | The table that records should be linked to |
-| `target_match_field` | Field | The field in the target table to match values against |
-| `linked_record_field` | Field | The linked record field in the source table to populate |
-
 ## How to Use
 
 1. Open your Airtable base
 2. Go to **Extensions → Scripting**
 3. Paste the contents of `field-to-linked-record-migrator.js`
-4. Configure the five settings in the script settings panel
-5. Click **Run**
+4. Click **Run**
+5. The script will walk you through five interactive prompts to pick your tables and fields
 6. Review the migration plan and confirm
 7. Review the value discovery preview and confirm
 8. Wait for the migration to complete
 9. Verify your data and optionally delete the original field
 
+No pre-configuration needed — the script uses Airtable's native table and field pickers at runtime.
+
 ## Safety Features
 
 - **Two confirmation steps** before any data is modified
+- **Computed field guard** — blocks migration if the target match field is a formula, rollup, or other unwritable type
 - **Appends links** — never overwrites existing linked records
 - **Error collection** — individual record failures don't crash the script; all errors are reported at the end
 - **Every record accounted for** — the summary shows updated, skipped, already-linked, empty, and errored counts
 - **Original field preserved** — the script never deletes the source field; you do that manually after verifying
+- **Clean cancellation** — cancelling at any confirmation step exits without errors or red banners
 
 ## Batch Limits
 
