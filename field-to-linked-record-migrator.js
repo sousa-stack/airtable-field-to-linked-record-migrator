@@ -7,16 +7,6 @@
 // --- Helpers -------------------------------------------------
 
 /**
- * Check if a cell value is "empty" for migration purposes.
- */
-function isEmpty(value) {
-    if (value === null || value === undefined) return true;
-    if (typeof value === 'string' && value.trim() === '') return true;
-    if (Array.isArray(value) && value.length === 0) return true;
-    return false;
-}
-
-/**
  * Extract a trimmed string from any field value.
  * Handles text, single select, number, email, URL, and other types.
  */
